@@ -1,0 +1,29 @@
+#!/bin/bash
+netadapters=$(ip -o link show | while read -r num dev fam mtulabel mtusize qlabel queu statelabel state modelabel mode grouplabel group qlenlabel qlen maclabel mac brdlabel brcast; do 
+        if [[ ${mac} != brd && ${mac} != 00:00:00:00:00:00 && ${dev} != br-*  && ${dev} != veth* ]]; then
+            echo ${dev%/*} | awk '{split($1,n,":");print n[1]}'; 
+        fi     
+    done
+    )   
+for netadapter in $(echo $netadapters); do
+    ip=$(ip -o addr show $netadapter primary scope global | while read -r num dev fam addr rest; do 
+        if [[ ${dev} != docker* ]]; then
+            echo ${addr%/*}; 
+        fi       
+    done
+    )
+    gateway=$(ip -o route list | grep default | while read -r default via gateway dev net; do echo $gateway;done )
+    netmask=$(ifconfig $netadapter | grep netmask | cut -d" " -f13)
+    nameserversarray=$(cat /etc/resolv.conf | grep -i nameserver|head -n2|cut -d ' ' -f2)
+    nameservers=$(echo $(echo "${nameserversarray[@]}"))
+    broadcast=$(ip a s dev $netadapter | awk '/inet / {print $4}')
+    dnssuffix=$(grep search /etc/resolv.conf | while read -r search suffix; do echo $suffix;done ) 
+    currentmode=$(cat /etc/network/interfaces | grep ${netadapter} | tail -1 | awk '{print $4}')
+
+    echo "nop:${netadapter} [Currently ${currentmode}\: ${ip}]"
+    echo "nop:------------------------"
+    echo "exec:Use DHCP for ${netadapter}:pause:clear;/loginvsi/bin/changenetwork ${netadapter} dhcp" \
+    echo "Setting $netadapter with mode $dhcp $ip $netmask $gateway $nameservers $search"
+    echo "exec:Set static IP for ${netadapter}:edit,pause:clear;/loginvsi/bin/changenetwork ${netadapter} static ~New IP Address:${ip}~ ~New netmask:${netmask}~ \"~DNS nameservers:${nameservers}~\" \"~DNS search domains:${dnssuffix}~\" ~Gateway:${gateway}~"
+    echo "nop"
+done 

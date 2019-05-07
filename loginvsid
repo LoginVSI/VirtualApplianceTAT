@@ -1,0 +1,214 @@
+#!/bin/bash
+### BEGIN INIT INFO
+# Provides:          loginvsid
+# Required-Start:    
+# Required-Stop:     
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: loginvsid
+# Description:       loginvsid
+### END INIT INFO
+# shellcheck disable=2060,2086,2046,2034
+netadapters=$(ip -o link show | while read -r num dev fam mtulabel mtusize qlabel queu statelabel state modelabel mode grouplabel group qlenlabel qlen maclabel mac brdlabel brcast; do 
+        if [[ ${mac} != brd && ${mac} != 00:00:00:00:00:00 && ${dev} != br-*  && ${dev} != veth* ]]; then
+            echo ${dev%/*} | awk '{split($1,n,":");print n[1]}'; 
+        fi     
+    done
+    )   
+for netadapter in $netadapters; do
+    ip=$(ip -o addr show $netadapter primary scope global | while read -r num dev fam addr rest; do 
+        if [[ ${dev} != docker* ]]; then
+            echo ${addr%/*}; 
+        fi       
+    done
+    )
+    allowed_ips+=";https://$ip" 
+done
+
+start() {
+  rm -rf /loginvsi/startup.log  
+  fqdn=$(hostname).$(domainname)
+  export fqdn
+  
+  # while [ 1 -gt 0 ]; do
+	# if [ -f /home/admin/.capturedockerstats ]; then
+	# 	if [ ! -f /home/admin/.dockerstats ]; then
+	# 		echo "Date,Name,CPUPerc,MemUsage,MemPerc,NetIO,BlockIO,PIDs" > /home/admin/.dockerstats
+	# 	fi
+	# 	docker stats --no-stream --format "$(date -Iseconds),{{.Name}},{{.CPUPerc}},{{.MemUsage}},{{.MemPerc}},{{.NetIO}},{{.BlockIO}},{{.PIDs}}" >> /home/admin/.dockerstats
+	# fi
+	# sleep 30
+  # done &
+  cd /loginvsi || (echo "Failed to find /loginvsi folder" && exit 1)
+  if [ ! -f /loginvsi/.portainerdisabled ]; then
+    if [ -n "$(docker ps -a -f name=portainer --format '{{.Image}}')" ]; then
+      echo "Portainer already started, skipping start of portainer..." 
+    else
+      echo  -n "Starting portainer..." 
+      docker run -d -p 9000:9000 --restart=always -v /loginvsi/img:/images -v /certificates:/certs -v /var/run/docker.sock:/var/run/docker.sock -v /opt/portainer:/data --name portainer portainer/portainer --ssl --sslkey /certs/${fqdn}.key.un --sslcert /certs/${fqdn}.crt --admin-password $(cat /root/.portainer) -H unix:///var/run/docker.sock   &>> /loginvsi/startup.log
+      printf "\e[32m[DONE]\e[39m \r\n" 
+    fi
+  else
+    if [ -n "$(docker ps -a -f name=portainer --format '{{.Image}}')" ]; then
+      docker rm -f portainer
+    fi
+  fi
+  #if [ ! -z $(docker ps -a -f name=appliancemanagement --format "{{.Image}}") ]; then
+  #  echo "ApplianceManagement container already exists, not recreating.."
+  #else  
+  #  docker service create --name appliancemanagement --publish 8000:8000 --secret ADMIN_PASSWORD --secret APPLIANCEMANAGEMENT_PFX --secret APPLIANCEMANAGEMENT_PFX_PASSWORD loginvsi/appliancemanagement:stable
+  #fi
+
+
+  allowed_urls=$(grep 'ALLOWED_CLIENT_URLS' < /loginvsi/.env | cut -d'=' -f2)
+  allowed_urls=$(echo $allowed_urls | sed "s,https://$fqdn,,g")
+  allowed_urls=$(echo $allowed_urls | sed "s,$allowed_ips,,g")
+  allowed_urls+=";https://$fqdn$allowed_ips"
+  
+  allowed_urls=${allowed_urls#";"}
+  
+  sed -i '/ALLOWED_CLIENT_URLS=/d' /loginvsi/.env
+  sed -i '/COMPOSE_PROJECT_NAME=/d' /loginvsi/.env
+  echo COMPOSE_PROJECT_NAME=loginvsi >>/loginvsi/.env
+  echo ALLOWED_CLIENT_URLS=$allowed_urls >>/loginvsi/.env
+  
+  export $(cat .env); docker stack deploy --prune --resolve-image never --compose-file ./docker-compose.yml VSI &>> /loginvsi/startup.log
+  sleep 5 &>>/loginvsi/startup.log
+  
+  for f in $(grep "{DB_ROOT}" < /loginvsi/docker-compose.yml)
+	do 
+		folder=$(echo $f | cut -d"-" -f2 | cut -d"/" -f2 | cut -d":" -f1) 
+		if [ -n "$folder" ]; then
+		  if [ ! -d /loginvsi/data/$folder ]; then        
+			  mkdir -p /loginvsi/data/$folder; 
+		  fi
+		fi
+	done
+  
+  TOTAL=$(docker stack services VSI --format "{{.Replicas}}" | wc -l)
+
+  MAXCOUNT=900
+  COUNT=0
+  while [ $COUNT -le $MAXCOUNT ];
+  do    
+    COUNT=$((COUNT+1))    
+    RUNNING=$(docker stack services VSI --format "{{.Replicas}}" | grep -c "1/1")    
+    if [ $TOTAL -eq $RUNNING ]; then
+      printf "\rStarting LoginVSI services... \e[32m[DONE]\e[39m \r\n" 
+      DONE="true" 
+      break
+    else
+      printf "\rStarting LoginVSI services... \e[36m[%s]\e[39m   " "$RUNNING/$TOTAL" 
+    fi
+    sleep 1 &>/dev/null  
+  done
+  if [ -z $DONE ]; then
+    printf "\rStarting LoginVSI services... \e[31m[TIMEOUT]\e[39m \r\n" 
+  else
+    
+    if [ -f /certificates/CA.crt ]; then       
+      services=$(docker service ps -q VSI_contentdelivery)
+      for f in $services; do
+        state=$(docker inspect --format "{{.Status.State}}" $f)
+        if [ $state == "running" ]; then        
+          container=$(docker inspect --format "{{.Status.ContainerStatus.ContainerID}}" $f) # needs to be checked when more then 1 instance of contentdelivery is running        
+          echo -n "Copying CA.crt to contentDelivery..."      
+          docker cp /certificates/CA.crt $container:/app/wwwroot/content 
+          printf "\e[32m[DONE]\e[39m \r\n"       
+        fi            
+      done              
+    fi
+  fi  
+}
+
+stop() { 
+  rm -rf /loginvsi/stop.log
+  echo -n "Stopping LoginVSI services..."
+  docker stack rm VSI  &>> /loginvsi/stop.log
+  while [[ -n "$(docker network ls -qf name=VSI_)" ]];
+  do    
+    docker network prune -f &>> /loginvsi/stop.log
+    sleep 5
+  done 
+  printf "\e[32m[DONE]\e[39m \r\n" 
+}
+
+restart() {
+ stop
+ start
+}
+
+status() {   
+  docker service ls -f name=VSI_   
+}
+update() {
+  #echo "new repo loginvsid"
+  [[ $(echo "$2" | tr '[:upper:]' '[:lower:]') == "offline" ]] && offline=true  
+  [[ $(echo "$2" | tr '[:upper:]' '[:lower:]') == "internal" ]] && internal=true  
+  cd /loginvsi || (echo "Failed to find /loginvsi folder" && exit 1)
+  if [ -d /loginvsi/update ]; then
+    rm -rf /loginvsi/update
+  fi
+  if [ -z $offline ]; then
+      read -r repo branch hostingfolder < /root/.hosting
+      #set this appliance to the release branch, even it was originally build from master branch
+      branch="release"
+      echo $branch
+      echo $repo $branch $hostingfolder > /root/.hosting 
+      if [ -z $internal ]; then                        
+        curl -Lfs -m 10 https://github.com/LoginVSI/VirtualApplianceTAT.git &> /dev/null || (echo "Failed to connect to github.com, make sure the appliance can access github.com" && exit 1)       
+        
+        git clone -b $branch -q https://github.com/LoginVSI/VirtualApplianceTAT.git /loginvsi/update  || (echo "Failed to clone repository, make sure the appliance can access githubber" && exit 1)
+      else
+        read -rep "InternalUrl for virtual appliance: " applianceurl
+        read -rep "InternalUrl for Hosting: " hostingurl
+        git clone -q $applianceurl /loginvsi/update || (echo "Failed to clone repository, make sure the appliance can access tfs, maybe made a typo?" && exit 1)
+      fi         
+  else
+    read -rep "Make sure the update iso is connected to the VM, press enter to continue" _
+    [[ ! -d /mnt/cdrom ]] && mkdir -p /mnt/cdrom
+    mount /dev/cdrom /mnt/cdrom
+
+    if [ ! -f /mnt/cdrom/update/update ]; then
+      echo "Could not find updater, probably the update iso was not mounted properly."
+      exit 1
+    fi
+    cp -rf /mnt/cdrom/update/ .  
+  fi
+  # execute update script
+
+  chmod +x /loginvsi/update/update
+  if [ -n "$offline" ]; then   
+    /loginvsi/update/update offline
+  elif [ -n "$internal" ]; then 
+    /loginvsi/update/update "$2" "$hostingurl"    
+  else
+    /loginvsi/update/update
+  fi
+  retVal=$?
+  if [ $retVal -ne 0 ]; then
+    echo "Update process exited with exit code: $retVal"
+    exit $retVal  
+  else  
+    loginvsid start  
+    rm -rf /loginvsi/update
+  fi
+
+  if [ -n "$offline" ];  then
+   umount /mnt/cdrom
+    rm -rf /mnt/cdrom
+  fi
+}
+
+
+
+case "$1" in
+  start|stop|restart|status) "$1" ;;
+  update) "$1" "$@" ;;
+  *)
+  echo "Invalid arguments!"
+  echo "Usage: $0 start|stop|restart|status"
+  echo "Updating online : $0 update"
+  echo "Updating offline: $0 update offline"  
+  ;;
+esac

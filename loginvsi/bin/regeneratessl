@@ -1,0 +1,42 @@
+#!/bin/bash
+if [ "$EUID" -ne 0 ]
+  then echo "Please run as root"
+  exit
+fi
+
+
+
+fqdn=$(hostname).$(domainname)
+
+#Generate random password and new self-signed certs
+cert_password=$(openssl rand -hex 32)
+/loginvsi/bin/sslgen -c=NL -s=Noord-Holland -l=Amsterdam -o="Login VSI B.V." -u=Development -n=${fqdn} -e=info@loginvsi.com -d=999999 -w=$cert_password -p=/certificates/
+
+# replace the paths in the .env file
+sed -i '/SSL_CERTIFICATE_KEY_PATH=/d' /loginvsi/.env
+sed -i '/SSL_CERTIFICATE_PATH=/d' /loginvsi/.env   
+echo "SSL_CERTIFICATE_KEY_PATH=/certificates/${fqdn}.key" >>/loginvsi/.env
+echo "SSL_CERTIFICATE_PATH=/certificates/${fqdn}.crt" >>/loginvsi/.env
+
+# switch to unsecure mode
+if [ $(docker service ls -q -f name=VSI_systemconfiguration | wc -l) -gt 0 ]; then
+    docker service --env-add SystemConfiguration__AllowUntrustedCertificates="true" VSI_systemconfiguration
+    docker service update --env-add SystemConfiguration__AllowUntrustedCertificates="true" VSI_sessionlogonscripts
+    sed -i 's,SystemConfiguration__AllowUntrustedCertificates: "false",SystemConfiguration__AllowUntrustedCertificates: "true",g' /loginvsi/docker-compose.yml
+fi  
+
+
+# Remove and recreate the secrets
+docker service rm VSI_gateway &>/dev/null
+docker secret rm VSI_SSL_CERTIFICATE_KEY_PASSWORD &>/dev/null
+docker secret rm VSI_VSI_SSL_CERTIFICATE &>/dev/null
+docker secret rm VSI_VSI_SSL_CERTIFICATE_KEY &>/dev/null
+
+echo $cert_password | docker secret create VSI_SSL_CERTIFICATE_KEY_PASSWORD - &>/dev/null
+
+
+
+
+#restart portainer and the gateway
+docker rm -f portainer &>/dev/null
+/usr/bin/loginvsid start

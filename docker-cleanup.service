@@ -1,0 +1,30 @@
+[Unit]
+Description=Cleanup of exited containers and unused images/volumes
+After=loginvsid.service
+Requires=docker.service
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Environment=IMAGE=meltwater/docker-cleanup:latest NAME=docker-cleanup
+
+# Allow docker pull to take some time
+TimeoutStartSec=600
+
+# Restart on failures
+KillMode=none
+Restart=always
+RestartSec=15
+
+ExecStartPre=-/usr/bin/docker kill $NAME
+ExecStartPre=-/usr/bin/docker rm $NAME
+ExecStartPre=-/bin/sh -c 'if ! docker images | tr -s " " : | grep "^${IMAGE}:"; then docker pull "${IMAGE}"; fi'
+ExecStart=/usr/bin/docker run \
+    -v /var/run/docker.sock:/var/run/docker.sock:rw \
+    -v /var/lib/docker:/var/lib/docker:rw \
+	-e KEEP_IMAGES=*:* \
+    --name=${NAME} \
+    $IMAGE
+
+ExecStop=/usr/bin/docker stop $NAME

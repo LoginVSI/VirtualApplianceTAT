@@ -1,0 +1,8 @@
+#!/bin/bash
+
+grep 'ALLOWED_CLIENT_URLS' < /loginvsi/.env | cut -d'=' -f2 > /tmp/allowed_urls
+nano /tmp/allowed_urls
+allowed_urls=$(cat /tmp/allowed_urls)
+rm /tmp/allowed_urls
+sed -i '/ALLOWED_CLIENT_URLS=/d' /loginvsi/.env
+echo ALLOWED_CLIENT_URLS=$allowed_urls >>/loginvsi/.env

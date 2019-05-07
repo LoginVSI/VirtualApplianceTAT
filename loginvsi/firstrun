@@ -1,0 +1,356 @@
+#!/bin/bash
+version=$(grep "Version__Number" < /loginvsi/docker-compose.yml | cut -d':' -f2 | cut -d"'" -f2 | tail -1)
+applianceversion=$(grep "Appliance_Version" < /loginvsi/docker-compose.yml | cut -d':' -f2 | cut -d"'" -f2 | tail -1)
+TITLE=$(cat /loginvsi/.title)
+# add first_run script
+netadapters=$(ip -o link show | while read -r num dev fam mtulabel mtusize qlabel queu statelabel state modelabel mode grouplabel group qlenlabel qlen maclabel mac brdlabel brcast; do 
+        if [[ ${mac} != brd && ${mac} != 00:00:00:00:00:00 && ${dev} != br-*  && ${dev} != veth* ]]; then
+            echo ${dev%/*}; 
+        fi
+    done
+    )
+netadapter=$(echo $netadapters | tail -1 | awk '{split($1,n,":");print n[1]}')
+
+
+ip=$(ip -o addr show $netadapter primary scope global | while read -r num dev fam addr rest; do 
+        if [[ ${dev} != docker* ]]; then
+            echo ${addr%/*}; 
+        fi
+    done
+    )
+gateway=$(ip -o route list | grep default | while read -r default via gateway dev net; do echo $gateway;done )
+netmask=$(ifconfig $netadapter | grep netmask | cut -d" " -f13)
+nameserversarray=$(cat /etc/resolv.conf | grep -i nameserver|head -n2|cut -d ' ' -f2)
+nameservers=$(echo $(echo "${nameserversarray[@]}"))
+broadcast=$(ip a s dev $netadapter | awk '/inet / {print $4}')
+dnssuffix=$(grep search /etc/resolv.conf | while read -r search suffix; do echo $suffix;done )
+
+ValidIpAddressRegex="^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$"
+ValidNetMaskRegex="^(((255\.){3}(255|254|252|248|240|224|192|128+))|((255\.){2}(255|254|252|248|240|224|192|128|0+)\.0)|((255\.)(255|254|252|248|240|224|192|128|0+)(\.0+){2})|((255|254|252|248|240|224|192|128|0+)(\.0+){3}))$"
+ValidHostnameRegex="^(([a-zA-Z]|[a-zA-Z][a-zA-Z0-9\-]*[a-zA-Z0-9])\.)*([A-Za-z]|[A-Za-z][A-Za-z0-9\-]*[A-Za-z0-9])$"
+
+if [ ! -f "/loginvsi/first_run.chk" ]; then
+trap 'echo "You cannot cancel this script!"' SIGINT
+    # check for interactive shell
+    if ! grep -q "noninteractive" /proc/cmdline ; then
+        stty sane
+
+        # ask questions
+        echo "Welcome to $TITLE - version $version ($applianceversion)"
+        echo "Please help answer the following questions to get the system setup..."
+        validhostname=false
+        while [[ $validhostname == false ]]; do        
+            read -rep " Please enter your computername (e.g $(hostname)):" new_hostname
+            result=""
+            result=$(echo $new_hostname | grep -P $ValidHostnameRegex)
+            if [[ ! -z $result ]]; then
+                validhostname=true
+            else
+                echo $result
+                echo "Invalid hostname!"
+            fi 
+        done
+        # check if hostname was supplied in fqdn notation
+        if [[ "$new_hostname" = *.* ]]; then
+            # remove everything up till and including the first . to get the domainname
+            new_domain=$(echo ${new_hostname#*.})
+            new_hostname=$(echo $new_hostname | cut -d "." -f1)
+        else
+            read -ep " Please enter your domain dns sufffix (e.g contoso.com):" new_domain
+        fi
+        
+
+        read -ep " Please choose a network configuration mode dhcp or static (D/s) " network
+        case $network in
+            s|S)
+
+                echo "Configuring network using static address..."
+                validip=false
+                while [[ $validip == false ]]; do
+                    read -rep " Please provide the new ip address ($ip): " new_ip
+                    if [[ ! -z $new_ip ]]; then
+                        result=""
+                        result=$(echo $new_ip | grep -P $ValidIpAddressRegex)
+                        if [[ ! -z $result ]]; then
+                            validip=true
+                        else
+                            echo "Invalid IP address!"
+                        fi
+                    fi
+                done;
+                validnetmask=false
+                while [[ $validnetmask == false ]]; do                    
+                    read -rep " Please provide the netmask ($netmask): " new_netmask
+                    if [[ ! -z $new_netmask ]]; then
+                        result=""
+                        result=$(echo $new_netmask | grep -P $ValidNetMaskRegex)
+                        if [[ ! -z $result ]]; then 
+                            validnetmask=true
+                        else
+                            echo "Invalid netmask address!"
+                        fi
+                    fi
+                done
+                validgateway=false                                
+                while [[ $validgateway == false ]]; do
+                    read -rep " Please provide the default gateway ($gateway): " new_gateway
+                    if [[ ! -z $new_gateway ]]; then
+                        result=""
+                        result=$(echo $new_gateway | grep -P $ValidIpAddressRegex)
+                        if [[ ! -z $result ]]; then 
+                            validgateway=true
+                        else
+                            echo "Invalid gateway address!"
+                        fi 
+                    fi
+                done
+                
+                read -rep " Please provide the nameservers ($nameservers) " new_nameservers
+                read -rep " Please provide the dns search suffix ($new_domain) " new_dnssuffix
+
+
+                [[ -z "$new_dnssuffix" ]] && new_dnssuffix=$new_domain
+                [[ ! -z "$new_ip" ]] && ip=$new_ip
+                [[ ! -z "$new_netmask" ]] && netmask=$new_netmask
+                [[ ! -z "$new_gateway" ]] && gateway=$new_gateway
+                [[ ! -z "$new_nameservers" ]] && nameservers=$new_nameservers
+
+                [[ ! -z "$new_dnssuffix" ]] && dnssuffix=$new_dnssuffix
+
+
+
+                echo "
+# This file describes the network interfaces available on your system
+# and how to activate them. For more information, see interfaces(5).
+
+source /etc/network/interfaces.d/*
+
+# The loopback network interface
+auto lo
+iface lo inet loopback
+
+# The primary network interface
+auto $netadapter
+iface $netadapter inet static        
+    address $ip
+    netmask $netmask
+    gateway $gateway
+    dns-search $dnssuffix
+    dns-nameservers $nameservers
+                " > /etc/network/interfaces
+                
+                ;;
+            *)
+                echo "Configuring network using dhcp..."
+               echo "
+# This file describes the network interfaces available on your system
+# and how to activate them. For more information, see interfaces(5).
+
+source /etc/network/interfaces.d/*
+
+# The loopback network interface
+auto lo
+iface lo inet loopback
+
+# The primary network interface
+auto $netadapter
+iface $netadapter inet dhcp        
+    " > /etc/network/interfaces
+    
+      ;;
+        esac
+
+        while :       
+        do
+            echo ""
+            read -ersp "Please enter a new password for admin: " password
+            echo ""
+            read -ersp "Please confirm the new password: " password2
+            echo ""
+            if [ "$password" != "$password2" ]; then
+                echo "Passwords do not match, try again..."
+            elif [[ "$password" == *[\"]* ]]; then
+                echo "Password cannot contain a double quote (\") character" 
+            else
+                echo "admin:$password" | chpasswd
+                echo "Password updated successfully"
+                break
+            fi
+        done
+    fi
+
+   
+    # set fqdn
+     [[ -z $new_hostname ]] && new_hostname=$(hostname)
+     [[ -z $new_domain ]] && new_domain="$(domainname)"
+    export fqdn="$new_hostname.$new_domain"    
+    echo ""
+    echo "Setting fqdn: $fqdn"
+	
+    
+    echo "Setting hostname: $new_hostname"
+    # update hostname
+    echo "$new_hostname" > /etc/hostname
+    echo "kernel.domainname=$new_domain" >>/etc/sysctl.conf
+    echo "127.0.0.1	localhost $new_hostname $fqdn
+    127.0.1.1	$fqdn
+    # The following lines are desirable for IPv6 capable hosts
+    ::1     localhost ip6-localhost ip6-loopback
+    ff02::1 ip6-allnodes
+    ff02::2 ip6-allrouters
+" > /etc/hosts
+    
+    hostname "$new_hostname"
+	
+	echo "   
+    Welcome to $TITLE - version $version ($applianceversion)
+    $TITLE appliance is not yet configured!
+    Logon with admin and the password you set previously
+	"  > /etc/issue
+    
+	
+	adminpass=$(docker run --rm httpd:2.4-alpine htpasswd -nbB admin $password | cut -d ":" -f 2)
+	
+	touch -f /loginvsi/first_run.chk
+	
+	echo "#!/bin/bash" > /home/admin/.bash_profile
+	echo "if [ ! -f '/loginvsi/second_run.chk' ]; then"  >> /home/admin/.bash_profile
+	echo "  base64 -d < /home/admin/.password | sudo -S -p '' echo 'Starting LoginVSI configuration tool...'" >> /home/admin/.bash_profile
+	echo "  sudo /loginvsi/firstrun" >> /home/admin/.bash_profile
+	echo "fi" >> /home/admin/.bash_profile
+	chmod +x /home/admin/.bash_profile
+    echo "$password" | base64 >/home/admin/.password
+    echo $adminpass >/root/.portainer
+	
+    chmod 700 /root/.portainer
+    
+    echo "Rebooting..."
+        sleep 5
+	reboot  
+	trap SIGINT	
+fi 
+if [ ! -f "/loginvsi/second_run.chk" ]; then
+	trap 'echo "You cannot cancel this script"' SIGINT
+	echo "Resetting SSH keys..."
+    /etc/init.d/ssh stop
+    rm -f /etc/ssh/ssh_host_*
+    dpkg-reconfigure -f noninteractive openssh-server
+    /etc/init.d/ssh start 
+    echo "Generating self-signed certificates..."
+	export fqdn=$(hostname).$(domainname)
+	mkdir /certificates
+	cert_password=$(openssl rand -hex 32)    
+	#Docker (encrypted key)
+    /loginvsi/bin/sslgen -c=NL -s=Noord-Holland -l=Amsterdam -o="Login VSI B.V." -u=Development -n=${fqdn} -e=info@loginvsi.com -d=999999 -w=$cert_password -p=/certificates/
+	   
+
+    echo "SSL_CERTIFICATE_KEY_PATH=/certificates/${fqdn}.key" >/loginvsi/.env
+    echo "SSL_CERTIFICATE_PATH=/certificates/${fqdn}.crt" >>/loginvsi/.env
+    echo "GATEWAY_PORT=443" >>/loginvsi/.env
+
+	# check if we have link & valid ip address
+    netadapters=$(ip -o link show | while read -r num dev fam mtulabel mtusize qlabel queu statelabel state modelabel mode grouplabel group qlenlabel qlen maclabel mac brdlabel brcast; do 
+        if [[ ${mac} != brd && ${mac} != 00:00:00:00:00:00 && ${dev} != br-*  && ${dev} != veth* ]]; then
+            echo ${dev%/*}; 
+        fi     
+    done
+    )
+    netadapter=$(echo $netadapters | tail -1 | awk '{split($1,n,":");print n[1]}')
+
+    if [ $(cat /sys/class/net/$netadapter/operstate) == "down" ]; then
+            echo -n "Network adapter $netadapter does not have a link, please make sure it is connected. Setup will not continue until the adapter has a link"
+    fi
+    while [ $(cat /sys/class/net/$netadapter/operstate) == "down" ]
+    do
+        echo -n "."
+        sleep 2
+        ifconfig $netadapter up
+    done
+    echo ""
+    ip=
+    ip=$(ip -o addr show $netadapter primary scope global | while read -r num dev fam addr rest; do 
+        if [[ ${dev} != docker* ]]; then
+            echo ${addr%/*}; 
+        fi       
+    done
+    )
+    if [ -z $ip ]; then
+         echo "Network adapter $netadapter does not have a valid ip address. Setup cannot continue. Please resolve the network connectivity issues manually and restart the appliance to resume setup."
+         exit 1
+    fi
+
+    
+    echo "Initting docker swarm..."  
+    docker swarm init &>/dev/null
+    base64 -d < /home/admin/.password | docker secret create ADMIN_PASSWORD - &>/dev/null
+    base64 -d < /home/admin/.password | docker secret create USER_PASSWORD - &>/dev/null    
+    rm /home/admin/.password
+    echo "$cert_password" | docker secret create VSI_SSL_CERTIFICATE_KEY_PASSWORD - &>/dev/null        
+    
+    # create launcher secret
+    openssl rand -hex 40 | head -c 40 | tr [:lower:] [:upper:] | docker secret create LAUNCHER_SECRET - &>/dev/null
+	openssl rand -hex 40 | head -c 40 | tr [:lower:] [:upper:] | docker secret create ENGINE_SECRET - &>/dev/null
+    # create data volume folders for the dbs
+    if [ ! -d /loginvsi/data ]; then        
+		mkdir /loginvsi/data
+	fi
+    echo "DB_ROOT=/loginvsi/data" >>/loginvsi/.env
+    for f in $(cat /loginvsi/docker-compose.yml | grep "{DB_ROOT}")
+    do 
+        folder=$(echo $f | cut -d"-" -f2 | cut -d"/" -f2 | cut -d":" -f1) 
+        if [ ! -z $folder ]; then
+          if [ ! -d /loginvsi/data/$folder ]; then        
+              mkdir /loginvsi/data/$folder; 
+          fi
+        fi
+    done
+
+    chmod +x /usr/bin/loginvsid
+    chown root:root /usr/bin/loginvsid
+	
+    
+    
+    #echo "HOST_URL=https://${fqdn}" >>/loginvsi/.env
+
+    #sed -i s,GATEWAY_PORT=3000,GATEWAY_PORT=443, /loginvsi/.env
+    #sed -i s,HOST_URL=https://localhost.loginvsi.com:3000,HOST_URL=https://${fqdn},  /loginvsi/.env
+    #sed -i s,SSL_CERTIFICATE_KEY_PATH=..\\..\\..\\Certificates\\certificate.key,SSL_CERTIFICATE_KEY_PATH=/certifcates/certificate.key, /loginvsi/.env
+    #sed -i s,SSL_CERTIFICATE_PATH=..\..\..\Certificates\certificate.crt,SSL_CERTIFICATE_PATH=/certifcates/certificate.crt, /loginvsi/.env
+    systemctl enable loginvsid &>/dev/null
+    systemctl enable docker-cleanup &>/dev/null
+    touch -f /loginvsi/second_run.chk
+    
+    echo "   
+    Welcome to $TITLE - version $version ($applianceversion)
+
+    The Login PI Webinterface is available at: 
+        https://\4{$netadapter}
+        https://\n.\o
+
+    NOTE: Please make sure to update your dns records accordingly
+    "  > /etc/issue    
+
+    echo "#!/bin/bash
+    sudo pdmenu -c -q /loginvsi/menu/pdmenurc" > /usr/bin/startmenu
+    chmod +x /usr/bin/startmenu
+    echo "admin ALL = (root) NOPASSWD: /usr/bin/pdmenu" >>/etc/sudoers
+    sed -i 's#admin:x:1000:1000:administrator,,,:/home/admin:/bin/bash#admin:x:1000:1000:administrator,,,:/home/admin:/usr/bin/startmenu#' /etc/passwd
+    echo "/usr/bin//startmenu" >> /etc/shells
+	
+	
+	#cleanup
+	echo "Cleaning up..."
+	# Cleanup
+    rm -rf /home/admin/*
+    rm -rf /home/admin/.bash_history
+    rm -rf /root/.bash_history
+    rm -rf /root/.ssh
+
+	
+trap SIGINT
+sed -i 's,PermitRootLogin yes,PermitRootLogin no,g' /etc/ssh/sshd_config
+sed -i 's,/usr/lib/openssh/sftp-server,internal-sftp,g' /etc/ssh/sshd_config
+chown -R admin:administrator /certificates
+reboot    
+   
+fi

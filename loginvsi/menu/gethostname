@@ -1,0 +1,5 @@
+#!/bin/bash
+current_hostname=$(hostname)
+current_domainname=$(domainname)
+fqdn="$current_hostname.$current_domainname"  
+echo "exec:Change the hostname:edit,p:/loginvsi/bin/changehostname ~New hostname (FQDN) ?:${fqdn}~"

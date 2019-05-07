@@ -1,0 +1,13 @@
+[Unit]
+Description=Login VSI daemon
+Before=getty@tty1.service getty@tty2.service getty@tty3.service getty@tty4.service getty@tty5.service getty@tty6.service
+After = docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/loginvsid start
+ExecStop=/usr/bin/loginvsid stop
+ExecReload=/usr/bin/loginvsid restart
+RemainAfterExit=true
+TimeoutSec=30min 00s
+[Install]
+WantedBy=multi-user.target

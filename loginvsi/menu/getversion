@@ -1,0 +1,5 @@
+#!/bin/bash
+version=$(grep "Version__Number" < /loginvsi/docker-compose.yml | cut -d':' -f2 | cut -d"'" -f2 | tail -1)
+applianceversion=$(grep "Appliance_Version" < /loginvsi/docker-compose.yml | cut -d':' -f2 | cut -d"'" -f2 | tail -1)
+TITLE=$(cat /loginvsi/.title)
+echo "title: ${TITLE} - ${version} (${applianceversion})"

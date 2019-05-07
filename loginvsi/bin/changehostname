@@ -1,0 +1,36 @@
+#!/bin/bash
+if [ "$EUID" -ne 0 ]
+  then echo "Please run as root"
+  exit
+fi
+#new_hostname=`echo $1 | awk -F. '{ print $1 }'`
+#new_domain=`echo $1 |awk -F. '{$1="";OFS="." ; print $0}' | sed 's/^.//' `
+new_hostname=`echo "$1" | cut -f1 -d.`
+new_domain=`expr "$1" | cut -f2- -d.`
+current_hostname=$(hostname)
+current_domainname=$(domainname)
+export fqdn="$new_hostname.$new_domain"    
+echo " Setting fqdn: $fqdn"
+echo " Setting domainname:" $new_domain
+echo " Setting hostname: $new_hostname"
+# update hostname
+echo "$new_hostname" > /etc/hostname
+echo "kernel.domainname=$new_domain" >>/etc/sysctl.conf
+
+echo "127.0.0.1	localhost $new_hostname $fqdn
+  127.0.1.1	$fqdn
+  # The following lines are desirable for IPv6 capable hosts
+  ::1     localhost ip6-localhost ip6-loopback
+  ff02::1 ip6-allnodes
+  ff02::2 ip6-allrouters
+" > /etc/hosts
+
+hostname "$new_hostname"
+domainname "$new_domain"
+read -ep "Do you want to regenerate the self-signed certificates? (Y/n) " regen
+if [ -z $regen ]; then
+  regen="y"
+fi
+if [ ${regen,,} == "y" ]; then
+  /loginvsi/bin/regeneratessl
+fi 

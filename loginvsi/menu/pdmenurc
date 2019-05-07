@@ -1,0 +1,56 @@
+#!/usr/bin/pdmenu
+
+#Note that the above bang-path isn't required, but it lets you run this
+#file directly as a sort of pdmenu script.
+color:title:black:lightgray
+color:base:black:black
+color:desktop:blue:black
+color:menu:black:lightgray
+color:selbar:lightgray:black
+#Define the main menu:
+preproc: /loginvsi/menu/getversion
+
+menu:main:Maintenance Menu
+	exit:Logout
+	exec:Reboot::sudo reboot
+	nop
+	exec:Change your password:pause:/loginvsi/bin/changepassword
+	preproc: /loginvsi/menu/gethostname
+	exec:Regenerate self-signed certificates:pause:/loginvsi/bin/regeneratessl
+	exec:Apply new certificate:pause:/loginvsi/bin/applypfx
+	exec:Change allowed urls:pause:/loginvsi/bin/changeallowedurls
+	exec:Update:pause:loginvsid update
+	exec:Stop and disable portainer:pause:/loginvsi/bin/disableportainer
+	exec:Start and enable portainer:pause:/loginvsi/bin/enableportainer
+	nop
+	group:Network Configuration
+	exec::makemenu: (\
+		echo 'menu:network_conf:Network Configuration' ; \
+		echo 'exit:Back to main menu' ; \
+		echo 'nop' ; \
+		echo 'exec:Show Network interfaces:display:/sbin/ifconfig -a' ; \
+		echo "exec:Show Routes:display:/sbin/route -n" ; \
+		echo 'nop' ; \
+		echo 'preproc:/loginvsi/menu/getnetworkadapters' ; \
+	)
+	show:::network_conf
+	remove:::network_conf
+	endgroup
+
+
+	show:Troubleshooting::troublshoot
+	
+menu:troublshoot:Troubleshooting
+	exit:Back to main menu
+	nop:--------------------------
+	exec:Start enable SSH server:pause:systemctl enable ssh;systemctl start ssh
+	exec:Stop and disable SSH server:pause:systemctl disable ssh; systemctl stop ssh	
+	exec:Restart portainer:pause:docker restart portainer	
+	exec:Ping:edit,pause:clear;ping -c 10 ~Address:~
+	exec:Show netstat:display:netstat -tuna
+	exec:Show LoginVSI service status:display:loginvsid status
+	exec:Restart LoginVSI services:pause:loginvsid restart
+	exec:Open bash shell::/bin/bash
+	exec:Factory Reset::/loginvsi/bin/factory_reset.sh
+	nop
+		

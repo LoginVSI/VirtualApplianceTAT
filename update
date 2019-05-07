@@ -1,0 +1,226 @@
+#!/bin/bash
+# shellcheck disable=2060,2086,2046,2034
+[[ $(echo "$1" | tr '[:upper:]' '[:lower:]') == "offline" ]] && offline=true
+[[ $(echo "$1" | tr '[:upper:]' '[:lower:]') == "internal" ]] && internal=true
+[[ $(echo "$1" | tr '[:upper:]' '[:lower:]') == "recurse" ]] && recurse=true
+
+
+cd /loginvsi || (echo "Failed to find /loginvsi folder" && exit 1)
+if [ -d /loginvsi/hosting ]; then
+    rm -rf /loginvsi/hosting
+fi 
+
+
+
+# Get the hosting repo
+while read -r repo branch hostingfolder; do             
+    #set this appliance to the release branch, even it was originally build from master branch
+    branch="release"
+    echo $repo $branch $hostingfolder > /root/.hosting 
+    if [ -z $offline ]; then 
+        if [ -n "$internal" ]; then
+            echo "Performing internal update from $2" 
+            git clone -q -b "$branch" "$2" /loginvsi/hosting || (echo "Failed to clone repository, make sure the appliance can access tfs" && exit 1)
+        else
+            curl -Lfs -m 10 https://github.com/LoginVSI/VirtualApplianceTAT.git &> /dev/null || (echo "Failed to connect to githudb, make sure the appliance can access github" && exit 1)
+            
+            curl -Lfs -m 10 https://index.docker.io/v1 &> /dev/null || (echo "Failed to connect to index.docker.io, make sure the appliance can access index.docker.io" && exit 1)
+            if [ -z $recurse ]; then
+                echo "Performing online update from $repo" 
+            fi
+            git clone -q -b "$branch" "$repo" /loginvsi/hosting;
+        fi
+    else
+        # offline updater, copy hosting files from hosting folder on iso        
+        cp -rf /mnt/cdrom/hosting/ .
+    fi
+    if [ ! -f /loginvsi/hosting/$hostingfolder/docker-compose.yml ]; then 
+		echo "Cloning hosting repo has failed, unable to continue update, please contact support@loginvsi.com"
+		exit 1
+	fi
+    if [ -z $recurse ]; then 
+        currentversion=$(grep "Version__Number" < /loginvsi/docker-compose.yml | cut -d':' -f2 | cut -d"'" -f2 | tail -1)    
+        newversion=$(grep "Version__Number" < /loginvsi/hosting/$hostingfolder/docker-compose.yml | cut -d':' -f2 | cut -d"'" -f2 | tail -1)
+        echo "This appliance is going to be updated to the latest version. Please make sure you have a backup of the system and data before proceeding."
+        read -rep "Are you sure you want to update from $currentversion to $newversion [y/N]: " PROCEED </dev/tty
+        DEFAULT="n"
+        PROCEED="${PROCEED:-${DEFAULT}}"
+        # convert to lowercase
+        PROCEED="${PROCEED,,,}"
+    else
+        PROCEED="y"
+    fi
+    
+    if [[ "${PROCEED}" == "y" ]]; then        
+        #if [ $currentversion == $newversion ]; then 
+        #    echo "This appliance is already using the latest version ($currentversion)."
+        #    exit 2
+        #fi
+        if [ -z $recurse ]; then   
+            echo -n "Updating from $currentversion to $newversion..."
+        fi
+        # copy latest compose file from hosting
+        echo "Copying hosting/$hostingfolder/docker-compose.yml to /loginvsi" &> /loginvsi/update.log
+        
+        # copy the new compose file
+        cp -f "/loginvsi/hosting/$hostingfolder/docker-compose.yml" /loginvsi
+        # get the status of trusted/untrusted certs
+        currentcertsetting=$(grep SystemConfiguration__AllowUntrustedCertificates < /loginvsi/docker-compose.yml | head -n1 | cut -d':' -f2 | cut -d '"' -f2)
+        if [ -n "$currentcertsetting" ]; then 
+            # persist status of trusted/untrusted certs
+            if [ $currentcertsetting == "true" ]; then
+                sed -i 's,SystemConfiguration__AllowUntrustedCertificates: "false",SystemConfiguration__AllowUntrustedCertificates: "true",g' /loginvsi/docker-compose.yml
+            else
+                sed -i 's,SystemConfiguration__AllowUntrustedCertificates: "true",SystemConfiguration__AllowUntrustedCertificates: "false",g' /loginvsi/docker-compose.yml
+            fi
+        fi
+        # Check if any new entries in new .env and add them to the current .env
+        for i in $(diff -y hosting/$hostingfolder/.env /loginvsi/.env | grep ">" | cut -d ">" -f2 | xargs); do
+            echo $i >> .env
+        done
+    fi
+done < /root/.hosting
+
+if [[ "${PROCEED}" == "y" ]]; then
+    #copy latest loginvsi folder
+    cp -f -r update/loginvsi/* /loginvsi/
+    chmod -R +x /loginvsi/bin
+
+    # copy loginvsid.service and loginvsid
+    cp -f update/loginvsid /usr/bin/
+    cp -f update/loginvsid.service /etc/systemd/system/
+
+    chmod +x /usr/bin/loginvsid
+    chown root:root /usr/bin/loginvsid
+    systemctl disable loginvsid &>> /loginvsi/update.log
+    systemctl enable loginvsid &>> /loginvsi/update.log
+
+    if [ ! -f /etc/docker/daemon.json ]; then
+        cp -f update/daemon.json /etc/docker
+    fi
+
+
+    # clean up hosting repo
+    rm -rf /loginvsi/hosting
+
+
+
+    # create new db folders if needed
+    for f in $(grep "{DB_ROOT}" < /loginvsi/docker-compose.yml)
+    do 
+        folder=$(echo $f | cut -d"-" -f2 | cut -d"/" -f2 | cut -d":" -f1) 
+        if [ -n "$folder" ]; then
+            if [ ! -d /loginvsi/data/$folder ]; then        
+                mkdir /loginvsi/data/$folder; 
+            fi
+        fi
+    done
+
+    # check if all secrets have been created
+    existingsecrets=$(docker secret ls --format "{{.Name}}")
+    composesecrets=""
+    secretsstartlinenumber=$(grep -n "^secrets:" /loginvsi/docker-compose.yml | cut -d':' -f1)
+    servicesstartlinenumber=$(grep -n "^services:" /loginvsi/docker-compose.yml | cut -d':' -f1)
+    OLDIFS=$IFS
+    IFS=$'\n'
+    for line in $(tail -n+$secretsstartlinenumber /loginvsi/docker-compose.yml | head -n $(($servicesstartlinenumber-$secretsstartlinenumber)) | grep "^ "); do
+        
+        if [[ -z $(echo $line | cut -d':' -f2) ]]; then 
+            composesecrets+=$(echo $line | cut -d':' -f1 | xargs)
+            composesecrets+=" "
+        fi
+    done
+    IFS=$OLDIFS
+
+    for newsecret in $(echo $existingsecrets $composesecrets | tr ' ' '\n' | sort | uniq -u); do 
+        case "$newsecret" in
+            *_SSL_CERTIFICATE|*_SSL_CERTIFICATE_KEY) 
+                # we do nothing with SSL_certs during update
+                ;;
+            LAUNCHER_SECRET)
+                echo "Found new secret: $newsecret, creating it now..." &>> /loginvsi/update.log
+                openssl rand -hex 40 | head -c 40 | tr [:lower:] [:upper:] | docker secret create LAUNCHER_SECRET - &>> /loginvsi/update.log
+                ;; 
+            ENGINE_SECRET)
+                echo "Found new secret: $newsecret, creating it now..." &>> /loginvsi/update.log
+                openssl rand -hex 40 | head -c 40 | tr [:lower:] [:upper:] | docker secret create ENGINE_SECRET - &>> /loginvsi/update.log
+                ;;             
+            *) 
+                echo "WARNING: Found new secret: $newsecret, but this updater does not know how to handle it!" 
+                ;;
+        esac    
+    done
+
+
+    if [ -z $offline ]; then 
+        # pull the new images from dockerhub if we are online
+        base64 -d < /root/.play | docker login -u vsiplayaccount --password-stdin &>> /loginvsi/update.log
+        cd /loginvsi || (echo "Failed to find /loginvsi folder" && exit 1)
+        docker-compose pull --quiet &>>/loginvsi/update.log 
+        if [ $? != 0 ]; then 
+         echo "Something went wrong during pulling of the images from docker hub, please verify this appliance can connect to index.docker.io" && exit 1
+        fi
+        #for image in $(grep image: < /loginvsi/docker-compose.yml | cut -d':' -f2,3| sort | uniq);do
+        #    docker pull $(echo $image | xargs) &>> /loginvsi/update.log
+        #done
+        docker pull portainer &>> /loginvsi/update.log
+        docker logout &>> /loginvsi/update.log
+    else
+        # offline update
+        # import registry
+        docker rm -f $(docker ps --filter name=update_registry -q) &>> /loginvsi/update.log
+        docker rmi registry:2 &>> /loginvsi/update.log
+        echo "$(date) Importing docker registry image, this might take a while"
+        gunzip -c /mnt/cdrom/registry.tar.gz | docker image import - registry:2 &>> /loginvsi/update.log
+        rm -rf /tmp/registry_data
+        mkdir -p /tmp/registry_data
+        tar -zxf /mnt/cdrom/registry_data.tar.gz --directory /tmp/registry_data &>> /loginvsi/update.log
+        docker run -v /tmp/registry_data:/var/lib/registry -d -p 55555:5000 --entrypoint /entrypoint.sh --name update_registry registry:2 /etc/docker/registry/config.yml &>> /loginvsi/update.log
+        echo "$(date) Importing docker images from local registry, this might take a while"
+        for image in $(grep image: < /loginvsi/docker-compose.yml | cut -d':' -f2,3| sort | uniq);do
+            docker pull $(echo localhost:55555/$image | xargs) &>> /loginvsi/update.log
+            docker tag $(echo localhost:55555/$image | xargs) $(echo $image | xargs) &>> /loginvsi/update.log
+            docker rmi $(echo localhost:55555/$image | xargs) &>> /loginvsi/update.log
+        done
+        docker pull localhost:55555/portainer &>> /loginvsi/update.log
+        docker tag localhost:55555/portainer portainer &>> /loginvsi/update.log
+        docker rmi localhost:55555/portainer &>> /loginvsi/update.log
+
+        docker rm -f $(docker ps --filter name=update_registry -q) &>> /loginvsi/update.log
+        docker rmi registry:2 &>> /loginvsi/update.log
+        docker rmi $(docker image ls localhost:55555/* --format "{{.Repository}}:{{.Tag}}") &>> /loginvsi/update.log
+        docker rmi $(docker image ls localhost:55555/*/* --format "{{.Repository}}:{{.Tag}}") &>> /loginvsi/update.log
+        rm -rf /tmp/registry_data    
+    fi
+
+    docker rm -f portainer &>> /loginvsi/update.log
+
+    netadapters=$(ip -o link show | while read -r num dev fam mtulabel mtusize qlabel queu statelabel state modelabel mode grouplabel group qlenlabel qlen maclabel mac brdlabel brcast; do 
+            if [[ ${mac} != brd && ${mac} != 00:00:00:00:00:00 && ${dev} != br-*  && ${dev} != veth* ]]; then
+                echo ${dev%/*}; 
+            fi
+        done
+        )
+    netadapter=$(echo $netadapters | tail -1 | awk '{split($1,n,":");print n[1]}')
+
+    version=$(grep "Version__Number" < /loginvsi/docker-compose.yml | cut -d':' -f2 | cut -d"'" -f2 | tail -1)
+    applianceversion=$(grep "Appliance_Version" < /loginvsi/docker-compose.yml | cut -d':' -f2 | cut -d"'" -f2 | tail -1)
+    TITLE=$(cat /loginvsi/.title)
+
+    echo "   
+        Welcome to $TITLE - version $version ($applianceversion)
+
+        The Login PI Webinterface is available at: 
+            https://\4{$netadapter}
+            https://\n.\o
+
+        NOTE: Please make sure to update your dns records accordingly
+        "  > /etc/issue    
+    # stop identityserver to force new version nr, will get restarted by loginvsid start
+    docker service rm VSI_identityserver &>> /loginvsi/update.log
+
+    rm -rf /home/admin/.git
+
+    printf "\e[32m[DONE]\e[39m \r\n"
+    # after this script loginvsid start will be called by the update process
+fi

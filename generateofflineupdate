@@ -1,0 +1,79 @@
+#!/bin/bash
+echo "###############################################################"
+echo "#             Offline update generator                        #"
+echo "###############################################################"
+echo "$(date) Installing prereqs"
+apt-get install -y genisoimage &>/dev/null
+rm -rf /tmp/awscli-bundle* 
+curl -s "https://s3.amazonaws.com/aws-cli/awscli-bundle.zip" -o "/tmp/awscli-bundle.zip"
+cd /tmp
+unzip awscli-bundle.zip &>/dev/null
+/tmp/awscli-bundle/install -b ~/bin/aws &>/dev/null
+rm -rf /tmp/awscli-bundle* 
+
+
+version=$(grep "Version__Number" < /loginvsi/docker-compose.yml | cut -d':' -f2 | cut -d"'" -f2 | tail -1)
+rm -rf /tmp/$version
+mkdir -p /tmp/$version
+
+echo "$(date) Starting local registry"
+docker rm -f $(docker ps --filter name=update_registry -q) &>/dev/null
+docker rmi registry:2 &>/dev/null
+mkdir /tmp/$version/registry_data
+docker run -v /tmp/$version/registry_data:/var/lib/registry -d -p 55555:5000 --name update_registry registry:2 &>/dev/null
+
+echo "$(date) Archiving Docker images"
+# tar the docker images
+for image in $(docker image ls --format "{{.Repository}}:{{.Tag}}" | grep -v registry:2);do
+    #docker image save -o $(echo /tmp/$version/images/$(echo $image | sed 's,/,@,g')) $image
+    docker image tag $image localhost:55555/$image &>/dev/null
+    docker image push localhost:55555/$image &>/dev/null
+    [[ $image == loginvsi/* ]] && name="LoginPI3"
+    [[ $image == loginvsi2/* ]] && name="LoginAT"
+done
+echo "$(date) Exporting local registry"
+docker container export update_registry | gzip > /tmp/$version/registry.tar.gz 
+cd /tmp/$version/registry_data
+tar -zcf /tmp/$version/registry_data.tar.gz docker
+
+rm -rf /tmp/$version/registry_data
+echo "$(date) Cloning git repos"
+cd /tmp/$version
+cat /root/.hosting | while read -r repo branch hostingfolder; do
+        git clone -q -b "$branch" "$repo" hosting;        
+done;
+git clone -q https://github.com/LoginVSI/VirtualAppliance.git update
+
+rm -rf /tmp/$version/*/.git
+
+isopath="/tmp/$name-$version.iso"
+echo "$(date) Generating ISO"
+genisoimage -quiet -joliet -joliet-long -o $isopath /tmp/$version
+
+read -ep "Press ENTER to upload the iso to amazon" unused
+# Upload update iso to amazon S3
+
+rm -rf /root/.aws
+echo "Only supply the AWS KEY ID and the secret key in the following questions, leave the rest empty"
+/root/bin/aws configure
+
+url="s3://loginvsidata/Virtual Appliance updates/$(echo $isopath |cut -d'/' -f3)"
+echo "$(date) Uploading $isopath to $url"
+/root/bin/aws s3 cp $isopath "$url"
+/root/bin/aws s3api put-object-acl --bucket loginvsidata --key "Virtual Appliance updates/$(echo $isopath |cut -d'/' -f3)" --acl public-read
+echo "Done!"
+echo "###############################################################"
+echo "https://s3-eu-west-1.amazonaws.com/loginvsidata/Virtual+Appliance+updates/$(echo $isopath |cut -d'/' -f3)"
+echo "###############################################################"
+
+#cleanup
+docker rmi $(docker image ls localhost:55555/* --format "{{.Repository}}:{{.Tag}}") &>/dev/null
+docker rmi $(docker image ls localhost:55555/*/* --format "{{.Repository}}:{{.Tag}}") &>/dev/null
+docker rm -f $(docker ps --filter name=update_registry -q) &>/dev/null
+docker rmi registry:2 &>/dev/null
+apt-get remove -y genisoimage &>/dev/null
+rm -rf /root/.aws 
+rm -rf /root/.local/lib/aws
+rm -rf /root/bin/aws
+rm -rf /tmp/$version
+
