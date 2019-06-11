@@ -151,8 +151,7 @@ update() {
   fi
   if [ -z $offline ]; then
       read -r repo branch hostingfolder < /root/.hosting
-      #set this appliance to the release branch, even it was originally build from master branch
-      branch="release"
+      branch="master"
       echo $branch
       echo $repo $branch $hostingfolder > /root/.hosting 
       if [ -z $internal ]; then                        

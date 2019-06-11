@@ -2,6 +2,7 @@
 rm -rf /loginvsi/.portainerdisabled
 if [ -z $(docker ps -a -f name=portainer --format "{{.Image}}") ]; then
     echo  -n "Starting portainer..." 
+	fqdn="$(hostname).$(domainname)"
     docker run -d -p 9000:9000 --restart=always -v /loginvsi/img:/images -v /certificates:/certs -v /var/run/docker.sock:/var/run/docker.sock -v /opt/portainer:/data --name portainer portainer/portainer --ssl --sslkey /certs/${fqdn}.key.un --sslcert /certs/${fqdn}.crt --admin-password $(cat /root/.portainer) -H unix:///var/run/docker.sock   &>> /loginvsi/startup.log
     printf "\e[32m[DONE]\e[39m \r\n" 
 fi
